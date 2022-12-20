@@ -1,0 +1,5 @@
+export ACCESS_KEY=
+export PASSPHRASE=
+export SIGNING_KEY=
+export PORTFOLIO_ID=
+export INFURA_KEY=
