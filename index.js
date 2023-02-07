@@ -1,5 +1,6 @@
 const axios = require("axios");
 const ethers = require("ethers");
+const { bignumber, number } = require("mathjs");
 const { Requester, Validator } = require("@chainlink/external-adapter");
 var CryptoJS = require("crypto-js");
 
@@ -823,30 +824,17 @@ const withTimestamp = async (blockNumber) => ({
 });
 
 const getLatestMethodologySetInfo = async (indexToken) => {
+  const latestBlock = await provider.getBlock("latest");
   const logs = await provider.getLogs({
     ...indexToken.filters.MethodologySet(),
-    fromBlock: (await provider.getBlockNumber()) - 1000000,
-    toBlock: "latest",
+    fromBlock: latestBlock.number - 1_000_000,
+    toBlock: latestBlock.number,
   });
   // TODO replace me with an assert
   if (logs.length === 0) {
     throw new Error("shouldn't happen");
   }
   const blockNumber = logs[logs.length - 1].blockNumber;
-  return await withTimestamp(blockNumber);
-};
-
-const getLatestMintToFeeReceiverInfo = async (indexToken, fromBlock) => {
-  const mintToFeeReceiverLogs = await provider.getLogs({
-    ...indexToken.filters.MintFeeToReceiver(),
-    fromBlock,
-    toBlock: "latest",
-  });
-
-  const blockNumber =
-    mintToFeeReceiverLogs.length === 0
-      ? fromBlock
-      : mintToFeeReceiverLogs[mintToFeeReceiverLogs.length - 1].blockNumber;
   return await withTimestamp(blockNumber);
 };
 
@@ -868,23 +856,98 @@ const getFeeChanges = async (indexToken, fromBlock, toBlock) => {
   );
 };
 
-const inflationInterval = (feeRate, fromTimestamp, toTimestamp) =>
-  (1 / (1 + feeRate)) ** ((toTimestamp - fromTimestamp) / (60 * 60 * 24));
-
-const calculateInflation = (
-  latestMethodologySetTimestamp,
-  feeWhenMethodologySet,
-  intervals
-) => {
+const calcMultiRateInflation = (startTimestamp, startFee, intervals) => {
   let inflation = 1;
-  let lastTimestamp = latestMethodologySetTimestamp;
-  let lastFeeRate = feeWhenMethodologySet;
+  let lastTimestamp = startTimestamp;
+  let lastFeeRate = startFee;
   for (const [timestamp, feeRate] of intervals) {
-    inflation *= inflationInterval(lastFeeRate, lastTimestamp, timestamp);
+    inflation *= calcInflation(lastFeeRate, lastTimestamp, timestamp);
     lastFeeRate = feeRate;
     lastTimestamp = timestamp;
   }
   return inflation;
+};
+
+const calcInflation = (feeRate, fromTimestamp, toTimestamp) => {
+  const bigNumResult = bignumber(1)
+    .div(bignumber(1).plus(feeRate))
+    .pow(
+      bignumber(toTimestamp)
+        .sub(bignumber(fromTimestamp))
+        .div(60 * 60 * 24)
+    );
+  return number(bigNumResult);
+};
+
+const fetchIPFSFromPinata = async (path) => {
+  const newPath = path.replace("ipfs://", "");
+  const baseURL = "dxas";
+  const ipfsUrl = `${baseURL}/${newPath}`;
+  const res = await axios.get(ipfsUrl, {
+    headers: {
+      Accept: "Accept: text/plain",
+    },
+  });
+  return res?.data;
+};
+
+const fetchIPFSFromInfura = async (path) => {
+  const newPath = path.replace("ipfs://", "");
+  const baseURL = "https://amkt.infura-ipfs.io/ipfs";
+  const ipfsUrl = `${baseURL}/${newPath}`;
+
+  const res = await axios.get(ipfsUrl, {
+    headers: {
+      Accept: "Accept: text/plain",
+    },
+  });
+  return res?.data;
+};
+
+const fetchIPFS = async (path, pinataFirst = true) => {
+  try {
+    if (pinataFirst) {
+      const data = await fetchIPFSFromPinata(path);
+      return data;
+    } else {
+      const data = await fetchIPFSFromInfura(path);
+      return data;
+    }
+  } catch (error) {
+    Logger.log(
+      `failed to fetch from ${pinataFirst ? "Pinata" : "Infura"}, trying ${
+        pinataFirst ? "Infura" : "Pinata"
+      }"}`
+    );
+    if (pinataFirst) {
+      const data = await fetchIPFSFromInfura(path);
+      return data;
+    } else {
+      const data = await fetchIPFSFromPinata(path);
+      return data;
+    }
+  }
+};
+
+const fetchMethodology = async () =>
+  (
+    await fetchIPFS(
+      await IndexToken.methodology({
+        blockTag: (await provider.getBlock("latest")).number,
+      }),
+      false
+    )
+  ).assets;
+
+const getAssetWeights = async () => {
+  const input = await getAssetWeightsInput();
+  return calcAssetWeights(
+    input.feeWhenMethodologySet,
+    input.feeChanges,
+    input.from,
+    input.to,
+    input.initialMethodology
+  );
 };
 
 const calcAssetWeights = (
@@ -900,7 +963,7 @@ const calcAssetWeights = (
     [to.timestamp, NaN],
   ];
 
-  const inflation = calculateInflation(
+  const inflation = calcMultiRateInflation(
     from.timestamp,
     feeWhenMethodologySet,
     intervals
@@ -914,27 +977,15 @@ const calcAssetWeights = (
   );
 };
 
-const readIPFS = async (path) => {
-  const newPath = path.replace("ipfs://", "");
-  const baseURL = "https://alongside.mypinata.cloud/ipfs";
-  const ipfsUrl = `${baseURL}/${newPath}`;
-
-  try {
-    const res = await axios.get(ipfsUrl);
-    return res.data;
-  } catch (error) {
-    throw error;
-  }
-};
-
-const fetchMethodology = async () =>
-  (await readIPFS(await IndexToken.methodology())).assets;
-
-const getAssetWeights = async () => {
+const getAssetWeightsInput = async () => {
   const indexToken = IndexToken;
   const from = await getLatestMethodologySetInfo(indexToken);
+  const latestBlock = await provider.getBlock("latest");
 
-  const to = await getLatestMintToFeeReceiverInfo(indexToken, from.blockNumber);
+  const to = {
+    timestamp: latestBlock.timestamp,
+    blockNumber: latestBlock.number,
+  };
 
   // fee at the time the methodology was set
   const feeWhenMethodologySet =
@@ -948,14 +999,15 @@ const getAssetWeights = async () => {
     from.blockNumber,
     to.blockNumber
   );
+  const initialMethodology = await fetchMethodology();
 
-  return calcAssetWeights(
+  return {
     feeWhenMethodologySet,
     feeChanges,
     from,
     to,
-    await fetchMethodology()
-  );
+    initialMethodology,
+  };
 };
 
 function sign(str, secret) {
