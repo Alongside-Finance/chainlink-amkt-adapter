@@ -914,7 +914,7 @@ const fetchIPFS = async (path, pinataFirst = true) => {
       return data;
     }
   } catch (error) {
-    Logger.log(
+    console.log(
       `failed to fetch from ${pinataFirst ? "Pinata" : "Infura"}, trying ${
         pinataFirst ? "Infura" : "Pinata"
       }"}`
