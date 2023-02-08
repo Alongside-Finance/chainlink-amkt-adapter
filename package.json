@@ -12,7 +12,9 @@
     "@chainlink/external-adapter": "^0.2.3",
     "axios": "^1.2.1",
     "crypto-js": "^4.1.1",
-    "ethers": "^5.7.2"
+    "dotenv": "^16.0.3",
+    "ethers": "^5.7.2",
+    "mathjs": "^11.5.1"
   },
   "devDependencies": {
     "body-parser": "^1.19.0",
